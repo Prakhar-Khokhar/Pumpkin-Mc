@@ -1175,85 +1175,93 @@ impl ProtoChunk {
         population_seed: u64,
         world_seed: i64,
     ) {
-        let mut tasks = Vec::new();
-        {
-            let center_chunk = cache.get_center_chunk();
-            let center_x = center_chunk.x;
-            let center_z = center_chunk.z;
+        // Vanilla `ChunkGenerator.applyBiomeDecoration` walks the structure registry
+        // once per decoration step, reseeding the feature random from the decoration seed,
+        // the running index and the step index before placing that structure's starts
+        // in the chunk. `index` is the structure's position inside its step's list in
+        // registry order, i.e. resource-location order, and it is counted for every
+        // structure of the step whether or not the chunk holds a start of it.
+        for (structure_index, id) in structures_in_step(step) {
+            let decorator_seed = get_decorator_seed(population_seed, structure_index, step as u64);
+            let mut random = RandomGenerator::Worldgen(WorldgenRandom::from_seed(decorator_seed));
 
-            for (id, instance) in &center_chunk.structure_starts {
-                let s = Structure::get(id);
-                if s.step.ordinal() != step {
-                    continue;
-                }
+            let mut tasks = Vec::new();
+            {
+                let center_chunk = cache.get_center_chunk();
+                let center_x = center_chunk.x;
+                let center_z = center_chunk.z;
 
-                match instance {
-                    StructureInstance::Start(pos) => tasks.push(pos.collector.clone()),
-                    StructureInstance::Reference(collector) => {
-                        let collector_arc = collector.clone();
-                        if !tasks.iter().any(|t| Arc::ptr_eq(t, &collector_arc)) {
-                            tasks.push(collector_arc);
-                        }
-                    }
-                }
-            }
-
-            let radius = 8;
-            for dx in -radius..=radius {
-                for dz in -radius..=radius {
-                    if dx == 0 && dz == 0 {
+                if let Some(instance) = center_chunk.structure_starts.get(&id) {
+                    let s = Structure::get(id);
+                    if s.step.ordinal() != step {
                         continue;
                     }
 
-                    let neighbor_x = center_x + dx;
-                    let neighbor_z = center_z + dz;
-
-                    if let Some(neighbor) = cache.try_get_proto_chunk(neighbor_x, neighbor_z) {
-                        for (id, instance) in &neighbor.structure_starts {
-                            let s = Structure::get(id);
-                            if s.step.ordinal() != step {
-                                continue;
+                    match instance {
+                        StructureInstance::Start(pos) => tasks.push(pos.collector.clone()),
+                        StructureInstance::Reference(collector) => {
+                            let collector_arc = collector.clone();
+                            if !tasks.iter().any(|t| Arc::ptr_eq(t, &collector_arc)) {
+                                tasks.push(collector_arc);
                             }
+                        }
+                    }
+                }
 
-                            match instance {
-                                StructureInstance::Start(pos) => {
-                                    let start_x = chunk_pos::start_block_x(center_x);
-                                    let start_z = chunk_pos::start_block_z(center_z);
-                                    let end_x = start_x + 15;
-                                    let end_z = start_z + 15;
+                let radius = 8;
+                for dx in -radius..=radius {
+                    for dz in -radius..=radius {
+                        if dx == 0 && dz == 0 {
+                            continue;
+                        }
 
-                                    if pos
-                                        .get_bounding_box()
-                                        .intersects_raw_xz(start_x, start_z, end_x, end_z)
-                                    {
-                                        let collector_arc = pos.collector.clone();
+                        let neighbor_x = center_x + dx;
+                        let neighbor_z = center_z + dz;
+
+                        if let Some(neighbor) = cache.try_get_proto_chunk(neighbor_x, neighbor_z) {
+                            if let Some(instance) = neighbor.structure_starts.get(&id) {
+                                let s = Structure::get(id);
+                                if s.step.ordinal() != step {
+                                    continue;
+                                }
+
+                                match instance {
+                                    StructureInstance::Start(pos) => {
+                                        let start_x = chunk_pos::start_block_x(center_x);
+                                        let start_z = chunk_pos::start_block_z(center_z);
+                                        let end_x = start_x + 15;
+                                        let end_z = start_z + 15;
+
+                                        if pos
+                                            .get_bounding_box()
+                                            .intersects_raw_xz(start_x, start_z, end_x, end_z)
+                                        {
+                                            let collector_arc = pos.collector.clone();
+                                            if !tasks.iter().any(|t| Arc::ptr_eq(t, &collector_arc)) {
+                                                tasks.push(collector_arc);
+                                            }
+                                        }
+                                    }
+                                    StructureInstance::Reference(collector) => {
+                                        let collector_arc = collector.clone();
                                         if !tasks.iter().any(|t| Arc::ptr_eq(t, &collector_arc)) {
                                             tasks.push(collector_arc);
                                         }
                                     }
                                 }
-                                StructureInstance::Reference(collector) => {
-                                    let collector_arc = collector.clone();
-                                    if !tasks.iter().any(|t| Arc::ptr_eq(t, &collector_arc)) {
-                                        tasks.push(collector_arc);
-                                    }
-                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        let decorator_seed = get_decorator_seed(population_seed, 0, step as u64);
-        let mut random = RandomGenerator::Worldgen(WorldgenRandom::from_seed(decorator_seed));
-
-        let chunk = cache.get_center_chunk_mut();
-        for collector_arc in tasks {
-            let mut collector = collector_arc
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            collector.generate_in_chunk(chunk, block_registry, &mut random, world_seed);
+            let chunk = cache.get_center_chunk_mut();
+            for collector_arc in tasks {
+                let mut collector = collector_arc
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                collector.generate_in_chunk(chunk, block_registry, &mut random, world_seed);
+            }
         }
     }
 
@@ -1307,6 +1315,25 @@ impl ProtoChunk {
         }
 
         ordered
+    }
+
+    /// The structures of one decoration step, paired with the index vanilla uses to
+    /// derive their feature seed.
+    ///
+    /// `ChunkGenerator.applyBiomeDecoration` groups the whole structure registry by
+    /// `structure.step().ordinal()` and walks each step's list in registry order,
+    /// seeding the feature random from the decoration seed, the running index and the step index,
+    /// and counting one index per structure whether or not the chunk holds a start of it.
+    ///
+    /// The structure registry is data-driven, so its iteration order is the
+    /// resource-location order that `StructureKeys::all_names` is generated in.
+    fn structures_in_step(step: usize) -> impl Iterator<Item = (u64, StructureKeys)> {
+        StructureKeys::all_names()
+            .iter()
+            .filter_map(|name| StructureKeys::from_name(name))
+            .filter(move |id| Structure::get(id).step.ordinal() == step)
+            .enumerate()
+            .map(|(index, id)| (index as u64, id))
     }
 
     /// Creates the structure starts owned by this chunk.
@@ -1459,8 +1486,17 @@ impl ProtoChunk {
                     let region_x = pumpkin_util::math::floor_div(self.x, spread.spacing);
                     let region_z = pumpkin_util::math::floor_div(self.z, spread.spacing);
 
-                    for rx in (region_x - 1)..=(region_x + 1) {
-                        for rz in (region_z - 1)..=(region_z + 1) {
+                    // Vanilla `ChunkGenerator.createReferences` looks at the starts of every
+                    // chunk within 8 chunks of this one, so cover every placement region
+                    // that overlaps that 17x17 window (for `spacing: 1` sets such as
+                    // mineshafts that is 289 regions, not the 9 around this chunk).
+                    let region_min_x = pumpkin_util::math::floor_div(self.x - 8, spread.spacing);
+                    let region_max_x = pumpkin_util::math::floor_div(self.x + 8, spread.spacing);
+                    let region_min_z = pumpkin_util::math::floor_div(self.z - 8, spread.spacing);
+                    let region_max_z = pumpkin_util::math::floor_div(self.z + 8, spread.spacing);
+
+                    for rx in region_min_x..=region_max_x {
+                        for rz in region_min_z..=region_max_z {
                             candidate_chunks.push(
                                 crate::generation::structure::placement::get_structure_chunk_in_region(
                                     spread,

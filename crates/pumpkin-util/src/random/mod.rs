@@ -150,6 +150,12 @@ pub const fn seed_slime_chunk(x: i32, z: i32, seed: u64, salt: u64) -> u64 {
 /// Generates a carver seed for cave and ravine generation.
 ///
 /// Carver seeds are used for terrain carving features like caves and ravines.
+/// This is vanilla's `WorldgenRandom.setLargeFeatureSeed(seed, chunkX, chunkZ)`:
+/// it seeds with the world seed, draws two longs as the X and Z scales, and
+/// re-seeds with `chunk_x * x_scale ^ chunk_z * z_scale ^ seed`.
+///
+/// Not to be confused with `setDecorationSeed`, which ORs the scales with 1 and
+/// *adds* the two products (see `get_population_seed`).
 ///
 /// # Arguments
 /// - `world_seed` – The base world seed (plus carver index).
@@ -162,12 +168,11 @@ pub const fn seed_slime_chunk(x: i32, z: i32, seed: u64, salt: u64) -> u64 {
 #[must_use]
 pub fn get_carver_seed(world_seed: u64, chunk_x: i32, chunk_z: i32) -> u64 {
     let mut random = LegacyRand::from_seed(world_seed);
-    let l = random.next_i64() | 1;
-    let m = random.next_i64() | 1;
-    ((chunk_x as i64)
-        .wrapping_mul(l)
-        .wrapping_add((chunk_z as i64).wrapping_mul(m)) as u64)
-        ^ world_seed
+    let x_scale = random.next_i64();
+    let z_scale = random.next_i64();
+    ((chunk_x as i64).wrapping_mul(x_scale)
+        ^ (chunk_z as i64).wrapping_mul(z_scale)
+        ^ (world_seed as i64)) as u64
 }
 
 /// Generates a large feature seed for structure selection and placement.
