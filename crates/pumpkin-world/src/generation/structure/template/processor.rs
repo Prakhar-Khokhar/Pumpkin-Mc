@@ -11,6 +11,7 @@ use pumpkin_util::{
     math::{int_provider::IntProvider, vector3::Vector3},
     random::{RandomImpl, hash_block_pos, legacy_rand::LegacyRand},
 };
+use pumpkin_util::worldgen::HeightMap;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -114,6 +115,19 @@ pub enum HeightmapType {
     OceanFloor,
     MotionBlocking,
     MotionBlockingNoLeaves,
+}
+
+impl From<HeightMap> for HeightmapType {
+    fn from(hm: HeightMap) -> Self {
+        match hm {
+            HeightMap::WorldSurfaceWg => HeightmapType::WorldSurfaceWg,
+            HeightMap::WorldSurface => HeightmapType::WorldSurface,
+            HeightMap::OceanFloorWg => HeightmapType::OceanFloorWg,
+            HeightMap::OceanFloor => HeightmapType::OceanFloor,
+            HeightMap::MotionBlocking => HeightmapType::MotionBlocking,
+            HeightMap::MotionBlockingNoLeaves => HeightmapType::MotionBlockingNoLeaves,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -451,7 +465,19 @@ impl StructureProcessor {
                     Some(state)
                 }
             }
-            Self::Gravity { .. } | Self::Nop => Some(state),
+            Self::Gravity { heightmap, offset } => {
+                // Adjust Y position based on the heightmap
+                let terrain_height = placer.column_height(*heightmap, world_pos.x, world_pos.z);
+                let new_y = terrain_height + offset;
+                if new_y != world_pos.y {
+                    let new_pos = Vector3::new(world_pos.x, new_y, world_pos.z);
+                    // Recursively process at the new position
+                    self.process_with_context(placer, new_pos, state, nbt, context, capped_idx, rng)
+                } else {
+                    Some(state)
+                }
+            }
+            Self::Nop => Some(state),
             Self::ProtectedBlocks(tag) => {
                 let world_state_id = placer.get_block_state(&world_pos);
                 if check_block_has_tag(world_state_id.to_block_id(), tag) {

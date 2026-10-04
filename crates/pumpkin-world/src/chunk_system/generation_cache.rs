@@ -322,12 +322,42 @@ impl GenerationCache for Cache {
 
     fn get_top_y(&self, heightmap: &HeightMap, x: i32, z: i32) -> i32 {
         match heightmap {
-            HeightMap::WorldSurfaceWg | HeightMap::WorldSurface => {
-                self.top_block_height_exclusive(x, z)
+            HeightMap::WorldSurfaceWg | HeightMap::OceanFloorWg => {
+                // For Chunk::Level, read dedicated WG heightmaps; for ProtoChunk, use its method
+                if let Some(chunk) = self.try_get_proto_chunk(x >> 4, z >> 4) {
+                    return chunk.get_top_y(heightmap, x, z);
+                }
+                // Fall through to read from Chunk::Level
+                let chunk_idx = ((x >> 4) - self.x) * self.size + ((z >> 4) - self.z);
+                if let Chunk::Level(data) = &self.chunks[chunk_idx as usize] {
+                    let heightmap_lock = data
+                        .heightmap
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let min_y = data.section.min_y;
+                    let chunk_hm_type = match heightmap {
+                        HeightMap::WorldSurfaceWg => ChunkHeightmapType::WorldSurfaceWg,
+                        _ => ChunkHeightmapType::OceanFloorWg,
+                    };
+                    return heightmap_lock.get(chunk_hm_type, x, z, min_y);
+                }
+                // Fallback
+                let default_chunk = self.chunks[0].as_level().unwrap_or_else(|| {
+                    panic!("No level chunk available for heightmap lookup");
+                });
+                let heightmap_lock = default_chunk
+                    .heightmap
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let min_y = default_chunk.section.min_y;
+                let chunk_hm_type = match heightmap {
+                    HeightMap::WorldSurfaceWg => ChunkHeightmapType::WorldSurfaceWg,
+                    _ => ChunkHeightmapType::OceanFloorWg,
+                };
+                heightmap_lock.get(chunk_hm_type, x, z, min_y)
             }
-            HeightMap::OceanFloorWg | HeightMap::OceanFloor => {
-                self.ocean_floor_height_exclusive(x, z)
-            }
+            HeightMap::WorldSurface => self.top_block_height_exclusive(x, z),
+            HeightMap::OceanFloor => self.ocean_floor_height_exclusive(x, z),
             HeightMap::MotionBlocking => self.top_motion_blocking_block_height_exclusive(x, z),
             HeightMap::MotionBlockingNoLeaves => {
                 self.top_motion_blocking_block_no_leaves_height_exclusive(x, z)
@@ -384,7 +414,7 @@ impl GenerationCache for Cache {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let min_y = data.section.min_y;
-                heightmap.get(ChunkHeightmapType::WorldSurface, x, z, min_y) // can we return this?
+                heightmap.get(ChunkHeightmapType::WorldSurfaceWg, x, z, min_y)
             }
             Chunk::Proto(data) => data.top_block_height_exclusive(x, z),
         }
@@ -397,8 +427,13 @@ impl GenerationCache for Cache {
             return 0;
         }
         match &self.chunks[(dx * self.size + dy) as usize] {
-            Chunk::Level(_data) => {
-                0 // todo missing
+            Chunk::Level(data) => {
+                let heightmap = data
+                    .heightmap
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let min_y = data.section.min_y;
+                heightmap.get(ChunkHeightmapType::OceanFloorWg, x, z, min_y)
             }
             Chunk::Proto(data) => data.ocean_floor_height_exclusive(x, z),
         }

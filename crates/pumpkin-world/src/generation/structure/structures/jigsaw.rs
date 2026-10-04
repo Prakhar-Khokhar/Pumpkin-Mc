@@ -837,6 +837,21 @@ impl StructurePieceBase for PoolElementStructurePiece {
                     }
                     ProcessorListRef::Empty => Arc::from([]),
                 };
+
+                // For TerrainMatching projection, prepend Gravity processor to adjust Y to terrain height.
+                // This must come BEFORE Rule processors so location_predicate checks correct Y for water/ice.
+                let mut final_processors = processors.as_ref().to_vec();
+                if self.projection == JigsawProjection::TerrainMatching {
+                    use crate::generation::structure::template::processor::{HeightmapType, StructureProcessor};
+                    final_processors.insert(
+                        0,
+                        StructureProcessor::Gravity {
+                            heightmap: HeightmapType::WorldSurfaceWg,
+                            offset: -1,
+                        },
+                    );
+                }
+
                 crate::generation::structure::template::place_template(
                     chunk,
                     &template,
@@ -845,7 +860,7 @@ impl StructurePieceBase for PoolElementStructurePiece {
                     self.rotation,
                     legacy,
                     self.liquid_settings == LiquidSettings::ApplyWaterlog,
-                    processors.as_ref(),
+                    &final_processors,
                     Some(chunk_box),
                 );
                 crate::generation::structure::template::place_template_entities(
@@ -898,6 +913,21 @@ pub fn place_pool_element_templates(
                 }
                 ProcessorListRef::Empty => Arc::from([]),
             };
+
+            // For TerrainMatching projection, prepend Gravity processor to adjust Y to terrain height.
+            // This must come BEFORE Rule processors so location_predicate checks correct Y for water/ice.
+            let mut final_processors = processors.as_ref().to_vec();
+            if piece.projection == JigsawProjection::TerrainMatching {
+                use crate::generation::structure::template::processor::{HeightmapType, StructureProcessor};
+                final_processors.insert(
+                    0,
+                    StructureProcessor::Gravity {
+                        heightmap: HeightmapType::WorldSurfaceWg,
+                        offset: -1,
+                    },
+                );
+            }
+
             crate::generation::structure::template::place_template_with_options(
                 placer,
                 &template,
@@ -906,7 +936,7 @@ pub fn place_pool_element_templates(
                 piece.rotation,
                 legacy,
                 piece.liquid_settings == LiquidSettings::ApplyWaterlog,
-                processors.as_ref(),
+                &final_processors,
                 chunk_box,
                 keep_jigsaws,
             );

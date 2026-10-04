@@ -61,6 +61,48 @@ pub trait BlockPlacer {
     fn get_block_state(&self, pos: &Vector3<i32>) -> BlockStateId;
     fn set_block_state(&mut self, pos: &Vector3<i32>, state: &BlockState);
     fn add_block_entity(&mut self, nbt: NbtCompound);
+
+    /// Returns the height of the column at the given position for the specified heightmap type.
+    /// Used by the Gravity processor to find terrain height.
+    fn column_height(
+        &self,
+        heightmap: crate::generation::structure::template::processor::HeightmapType,
+        x: i32,
+        z: i32,
+    ) -> i32 {
+        // Default implementation for basic heightmaps; ProtoChunk and WorldBlockPlacer override
+        // for WorldSurfaceWg and OceanFloorWg.
+        let bottom = i32::MIN;
+        let ceiling = match heightmap {
+            HeightmapType::WorldSurfaceWg | HeightmapType::WorldSurface => 320,
+            HeightmapType::OceanFloorWg | HeightmapType::OceanFloor => 320,
+            HeightmapType::MotionBlocking => 320,
+            HeightmapType::MotionBlockingNoLeaves => 320,
+        };
+        (bottom..ceiling)
+            .rev()
+            .find(|&y| {
+                let id = self.get_block_state(&Vector3::new(x, y, z));
+                let state = BlockState::from_id(id);
+                match heightmap {
+                    HeightmapType::WorldSurfaceWg | HeightmapType::WorldSurface => !state.is_air(),
+                    HeightmapType::OceanFloorWg | HeightmapType::OceanFloor => {
+                        let block = state.to_block_id();
+                        pumpkin_data::fluid::blocks_movement(state, block)
+                    }
+                    HeightmapType::MotionBlocking => {
+                        let block = state.to_block_id();
+                        pumpkin_data::fluid::blocks_movement(state, block) || state.is_liquid()
+                    }
+                    HeightmapType::MotionBlockingNoLeaves => {
+                        let block = state.to_block_id();
+                        (pumpkin_data::fluid::blocks_movement(state, block) || state.is_liquid())
+                            && !block.has_tag(pumpkin_data::tag::Block::MINECRAFT_LEAVES)
+                    }
+                }
+            })
+            .unwrap_or(bottom)
+    }
 }
 
 /// Places a template at a world origin with an un-rotated XZ offset.

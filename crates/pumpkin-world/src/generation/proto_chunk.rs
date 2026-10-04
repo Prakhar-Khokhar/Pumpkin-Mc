@@ -137,6 +137,11 @@ pub struct ProtoChunk {
     pub flat_motion_blocking_no_leaves_height_map: [i16; CHUNK_AREA],
     structure_starts: FxHashMap<StructureKeys, StructureInstance>,
 
+    /// Preserved terrain heightmaps from the Surface stage (after terrain generation,
+    /// before carvers/structures modify blocks). Used by TerrainMatching projection
+    /// for village paths and other structures.
+    terrain_heightmaps: Option<Box<ChunkHeightmaps>>,
+
     height: u16,
     bottom_y: i8,
     generation_height: u16,
@@ -238,6 +243,7 @@ impl ProtoChunk {
             flat_motion_blocking_height_map: default_heightmap,
             flat_motion_blocking_no_leaves_height_map: default_heightmap,
             structure_starts: FxHashMap::default(),
+            terrain_heightmaps: None,
             height,
             bottom_y,
             generation_height,
@@ -366,6 +372,21 @@ impl ProtoChunk {
 
         let saved_stage = StagedChunkEnum::from(chunk_data.status);
         proto_chunk.stage = saved_stage;
+
+        // Restore terrain heightmaps for chunks at Carvers stage or later.
+        // These heightmaps (WorldSurfaceWg, OceanFloorWg) are frozen at the Surface stage
+        // and used by TerrainMatching projection for village paths.
+        if saved_stage >= StagedChunkEnum::Carvers
+            && heightmap_data.world_surface_wg.is_some()
+            && heightmap_data.ocean_floor_wg.is_some()
+        {
+            proto_chunk.terrain_heightmaps = Some(Box::new(ChunkHeightmaps {
+                world_surface_wg: heightmap_data.world_surface_wg.clone(),
+                ocean_floor_wg: heightmap_data.ocean_floor_wg.clone(),
+                ..ChunkHeightmaps::default()
+            }));
+        }
+
         if let super::generator::WorldGenerator::Noise(generator) = generator
             && (StagedChunkEnum::StructureStart..StagedChunkEnum::Features).contains(&saved_stage)
         {
@@ -454,19 +475,63 @@ impl ProtoChunk {
     }
 
     #[must_use]
-    pub const fn get_top_y(&self, heightmap: &HeightMap, x: i32, z: i32) -> i32 {
+    pub fn get_top_y(&self, heightmap: &HeightMap, x: i32, z: i32) -> i32 {
+        use crate::generation::structure::template::processor::HeightmapType;
+
         match heightmap {
-            HeightMap::WorldSurfaceWg | HeightMap::WorldSurface => {
-                self.top_block_height_exclusive(x, z)
+            HeightMap::WorldSurfaceWg | HeightMap::OceanFloorWg => {
+                let (stored, current) = match heightmap {
+                    HeightMap::WorldSurfaceWg => (
+                        ChunkHeightmapType::WorldSurfaceWg,
+                        HeightmapType::WorldSurface,
+                    ),
+                    _ => (
+                        ChunkHeightmapType::OceanFloorWg,
+                        HeightmapType::OceanFloor,
+                    ),
+                };
+                self.terrain_heightmaps.as_ref().map_or_else(
+                    || self.column_height(current, x, z),
+                    |maps| maps.get(stored, x, z, i32::from(self.bottom_y())) + 1,
+                )
             }
-            HeightMap::OceanFloorWg | HeightMap::OceanFloor => {
-                self.ocean_floor_height_exclusive(x, z)
-            }
+            HeightMap::WorldSurface => self.top_block_height_exclusive(x, z),
+            HeightMap::OceanFloor => self.ocean_floor_height_exclusive(x, z),
             HeightMap::MotionBlocking => self.top_motion_blocking_block_height_exclusive(x, z),
             HeightMap::MotionBlockingNoLeaves => {
                 self.top_motion_blocking_block_no_leaves_height_exclusive(x, z)
             }
         }
+    }
+
+    pub(crate) fn terrain_heightmaps(&self) -> ChunkHeightmaps {
+        if let Some(heightmaps) = &self.terrain_heightmaps {
+            return heightmaps.as_ref().clone();
+        }
+        let mut heightmaps = ChunkHeightmaps::default();
+        for x in 0..16 {
+            for z in 0..16 {
+                for (stored, source) in [
+                    (
+                        ChunkHeightmapType::WorldSurfaceWg,
+                        HeightMap::WorldSurfaceWg,
+                    ),
+                    (
+                        ChunkHeightmapType::OceanFloorWg,
+                        HeightMap::OceanFloorWg,
+                    ),
+                ] {
+                    heightmaps.set(
+                        stored,
+                        x,
+                        z,
+                        self.get_top_y(&source, x, z) - 1,
+                        i32::from(self.bottom_y()),
+                    );
+                }
+            }
+        }
+        heightmaps
     }
 
     #[must_use]
@@ -789,6 +854,11 @@ impl ProtoChunk {
             surface_biomes,
             &mut surface_height_estimate_sampler,
         );
+        
+        // Freeze terrain heightmaps (WorldSurfaceWg, OceanFloorWg) for TerrainMatching projection.
+        // These must be captured at the Surface stage, before carvers and structures modify blocks.
+        self.terrain_heightmaps = Some(Box::new(self.terrain_heightmaps()));
+
         self.stage = StagedChunkEnum::Surface;
     }
 
@@ -1650,6 +1720,48 @@ impl BlockPlacer for ProtoChunk {
 
     fn add_block_entity(&mut self, nbt: NbtCompound) {
         self.add_block_entity(nbt);
+    }
+
+    fn column_height(
+        &self,
+        heightmap: crate::generation::structure::template::processor::HeightmapType,
+        x: i32,
+        z: i32,
+    ) -> i32 {
+        use crate::generation::structure::template::processor::HeightmapType;
+
+        if matches!(
+            heightmap,
+            HeightmapType::WorldSurfaceWg | HeightmapType::OceanFloorWg
+        ) {
+            return self.get_top_y(&heightmap.into(), x, z);
+        }
+
+        let bottom = i32::from(self.bottom_y());
+        let ceiling = self.get_top_y(&heightmap.into(), x, z);
+
+        // Earlier pieces can clear blocks without lowering the cached height.
+        (bottom..ceiling)
+            .rev()
+            .find(|&y| {
+                let id = self.get_block_state(&Vector3::new(x, y, z));
+                let state = BlockState::from_id(id);
+                match heightmap {
+                    HeightmapType::WorldSurfaceWg | HeightmapType::WorldSurface => !state.is_air(),
+                    HeightmapType::OceanFloorWg | HeightmapType::OceanFloor => {
+                        pumpkin_data::fluid::blocks_movement(state, id.to_block_id())
+                    }
+                    HeightmapType::MotionBlocking => {
+                        pumpkin_data::fluid::blocks_movement(state, id.to_block_id()) || state.is_liquid()
+                    }
+                    HeightmapType::MotionBlockingNoLeaves => {
+                        let block = id.to_block_id();
+                        (pumpkin_data::fluid::blocks_movement(state, block) || state.is_liquid())
+                            && !block.has_tag(pumpkin_data::tag::Block::MINECRAFT_LEAVES)
+                    }
+                }
+            })
+            .map_or(bottom, |y| y + 1)
     }
 }
 

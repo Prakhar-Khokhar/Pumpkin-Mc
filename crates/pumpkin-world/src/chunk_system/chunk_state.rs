@@ -240,29 +240,67 @@ impl Chunk {
     }
 
     fn build_level_heightmaps(proto_chunk: &ProtoChunk, min_y: i32) -> ChunkHeightmaps {
-        let mut heightmaps = ChunkHeightmaps::default();
-        for x in 0..16 {
-            for z in 0..16 {
-                let source_index = x * 16 + z;
-                for (heightmap_type, height) in [
-                    (
-                        ChunkHeightmapType::WorldSurface,
-                        proto_chunk.flat_surface_height_map[source_index],
-                    ),
-                    (
-                        ChunkHeightmapType::MotionBlocking,
-                        proto_chunk.flat_motion_blocking_height_map[source_index],
-                    ),
-                    (
-                        ChunkHeightmapType::MotionBlockingNoLeaves,
-                        proto_chunk.flat_motion_blocking_no_leaves_height_map[source_index],
-                    ),
-                ] {
-                    heightmaps.set(heightmap_type, x as i32, z as i32, i32::from(height), min_y);
+        // If terrain_heightmaps are preserved (from Surface stage), use them for WG heightmaps.
+        // Otherwise, fall back to the current flat heightmaps.
+        if let Some(terrain_hm) = &proto_chunk.terrain_heightmaps {
+            let mut heightmaps = terrain_hm.as_ref().clone();
+            // Also populate the standard heightmaps from flat arrays
+            for x in 0..16 {
+                for z in 0..16 {
+                    let source_index = x * 16 + z;
+                    for (heightmap_type, height) in [
+                        (
+                            ChunkHeightmapType::WorldSurface,
+                            proto_chunk.flat_surface_height_map[source_index],
+                        ),
+                        (
+                            ChunkHeightmapType::MotionBlocking,
+                            proto_chunk.flat_motion_blocking_height_map[source_index],
+                        ),
+                        (
+                            ChunkHeightmapType::MotionBlockingNoLeaves,
+                            proto_chunk.flat_motion_blocking_no_leaves_height_map[source_index],
+                        ),
+                    ] {
+                        heightmaps.set(heightmap_type, x as i32, z as i32, i32::from(height), min_y);
+                    }
                 }
             }
+            heightmaps
+        } else {
+            // Fallback: build all from flat arrays
+            let mut heightmaps = ChunkHeightmaps::default();
+            for x in 0..16 {
+                for z in 0..16 {
+                    let source_index = x * 16 + z;
+                    for (heightmap_type, height) in [
+                        (
+                            ChunkHeightmapType::WorldSurface,
+                            proto_chunk.flat_surface_height_map[source_index],
+                        ),
+                        (
+                            ChunkHeightmapType::MotionBlocking,
+                            proto_chunk.flat_motion_blocking_height_map[source_index],
+                        ),
+                        (
+                            ChunkHeightmapType::MotionBlockingNoLeaves,
+                            proto_chunk.flat_motion_blocking_no_leaves_height_map[source_index],
+                        ),
+                        (
+                            ChunkHeightmapType::WorldSurfaceWg,
+                            proto_chunk.flat_surface_height_map[source_index],
+                        ),
+                        (
+                            ChunkHeightmapType::OceanFloorWg,
+                            proto_chunk.flat_ocean_floor_height_map[source_index],
+                        ),
+                    ] {
+                        heightmaps.set(heightmap_type, x as i32, z as i32, i32::from(height), min_y);
+                    }
+                }
+            }
+            heightmaps
         }
-        heightmaps
     }
 
     pub fn upgrade_to_level_chunk(

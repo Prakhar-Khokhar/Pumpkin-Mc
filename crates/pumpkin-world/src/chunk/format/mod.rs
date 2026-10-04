@@ -351,22 +351,24 @@ impl ChunkData {
             min_y,
         };
 
-        let heightmaps = root_tag.get_compound("Heightmaps").map_or(
-            ChunkHeightmaps {
-                world_surface: None,
-                motion_blocking: None,
-                motion_blocking_no_leaves: None,
-            },
+        let heightmaps = root_tag.get_compound("Heightmaps").map_or_else(
+            ChunkHeightmaps::default,
             |h_compound| ChunkHeightmaps {
                 world_surface: h_compound
                     .get_long_array("WORLD_SURFACE")
-                    .map(|a| a.to_vec().into_boxed_slice()),
+                    .and_then(|a| (a.len() == 37).then(|| a.to_vec().into_boxed_slice())),
                 motion_blocking: h_compound
                     .get_long_array("MOTION_BLOCKING")
-                    .map(|a| a.to_vec().into_boxed_slice()),
+                    .and_then(|a| (a.len() == 37).then(|| a.to_vec().into_boxed_slice())),
                 motion_blocking_no_leaves: h_compound
                     .get_long_array("MOTION_BLOCKING_NO_LEAVES")
-                    .map(|a| a.to_vec().into_boxed_slice()),
+                    .and_then(|a| (a.len() == 37).then(|| a.to_vec().into_boxed_slice())),
+                world_surface_wg: h_compound
+                    .get_long_array("WORLD_SURFACE_WG")
+                    .and_then(|a| (a.len() == 37).then(|| a.to_vec().into_boxed_slice())),
+                ocean_floor_wg: h_compound
+                    .get_long_array("OCEAN_FLOOR_WG")
+                    .and_then(|a| (a.len() == 37).then(|| a.to_vec().into_boxed_slice())),
             },
         );
         let mut block_ticks = Vec::new();
@@ -520,6 +522,12 @@ impl ChunkData {
         }
         if let Some(ref arr) = heightmap_lock.motion_blocking_no_leaves {
             heightmaps_compound.put("MOTION_BLOCKING_NO_LEAVES", NbtTag::LongArray(arr.to_vec()));
+        }
+        if let Some(ref arr) = heightmap_lock.world_surface_wg {
+            heightmaps_compound.put("WORLD_SURFACE_WG", NbtTag::LongArray(arr.to_vec()));
+        }
+        if let Some(ref arr) = heightmap_lock.ocean_floor_wg {
+            heightmaps_compound.put("OCEAN_FLOOR_WG", NbtTag::LongArray(arr.to_vec()));
         }
         root_compound.put_compound("Heightmaps", heightmaps_compound);
 
